@@ -112,7 +112,7 @@ class Errorhandler
 	 * @param   Exception  $e  the exception
 	 * @return  bool
 	 */
-	public static function exception_handler(\Exception $e)
+	public static function exception_handler($e)
 	{
 		if (method_exists($e, 'handle'))
 		{
@@ -170,7 +170,7 @@ class Errorhandler
 	 * @param   Exception  $e  the exception to show
 	 * @return  void
 	 */
-	public static function show_php_error(\Exception $e)
+	public static function show_php_error($e)
 	{
 		$fatal = (bool) ( ! in_array($e->getCode(), \Config::get('errors.continue_on', array())));
 		$data = static::prepare_exception($e, $fatal);
@@ -263,7 +263,7 @@ class Errorhandler
 	 *
 	 * @return  void
 	 */
-	public static function show_production_error(\Exception $e)
+	public static function show_production_error($e)
 	{
 		// when we're on CLI, always show the php error
 		if (\Fuel::$is_cli)
@@ -279,7 +279,7 @@ class Errorhandler
 		exit(\View::forge('errors'.DS.'production'));
 	}
 
-	protected static function prepare_exception(\Exception $e, $fatal = true)
+	protected static function prepare_exception($e, $fatal = true)
 	{
 		$data = array();
 		$data['type']		= get_class($e);
