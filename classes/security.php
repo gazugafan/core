@@ -252,7 +252,7 @@ class Security
 				$value[$k] = static::htmlentities($v, $flags, $encoding, $double_encode);
 			}
 		}
-		elseif ($value instanceof \Iterator or get_class($value) == 'stdClass')
+		elseif ($value instanceof \Iterator or \Pixelware\Core::get_class($value) == 'stdClass')
 		{
 			// Add to $already_cleaned variable
 			$already_cleaned[] = $value;
@@ -279,7 +279,7 @@ class Security
 			// Throw exception when it wasn't whitelisted and can't be converted to String
 			if ( ! method_exists($value, '__toString'))
 			{
-				throw new \RuntimeException('Object class "'.get_class($value).'" could not be converted to string or '.
+				throw new \RuntimeException('Object class "'.\Pixelware\Core::get_class($value).'" could not be converted to string or '.
 					'sanitized as ArrayAccess. Whitelist it in security.whitelisted_classes in app/config/config.php '.
 					'to allow it to be passed unchecked.');
 			}

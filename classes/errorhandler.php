@@ -282,7 +282,7 @@ class Errorhandler
 	protected static function prepare_exception($e, $fatal = true)
 	{
 		$data = array();
-		$data['type']		= get_class($e);
+		$data['type']		= \Pixelware\Core::get_class($e);
 		$data['severity']	= $e->getCode();
 		$data['message']	= $e->getMessage();
 		$data['filepath']	= $e->getFile();

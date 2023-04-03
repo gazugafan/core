@@ -473,7 +473,7 @@ class Request
 		}
 		else
 		{
-			throw new \FuelException(get_class($this->controller_instance).'::'.$method.'() or the controller after() method must return a Response object.');
+			throw new \FuelException(\Pixelware\Core::get_class($this->controller_instance).'::'.$method.'() or the controller after() method must return a Response object.');
 		}
 
 		// fire any request finished events

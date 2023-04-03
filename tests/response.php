@@ -76,7 +76,7 @@ class Test_Response extends TestCase
 		// execute with parameter
 		$value = 'body value';
 		$result = $response->body($value);
-		$this->assertEquals(get_class($result), get_class($response));
+		$this->assertEquals(\Pixelware\Core::get_class($result), \Pixelware\Core::get_class($response));
 
 		// execute without parameter and check updated value
 		$this->assertEquals($value, $response->body());
