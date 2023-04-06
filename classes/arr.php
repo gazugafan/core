@@ -54,7 +54,7 @@ class Arr
 
 		is_object($key) and $key = (string) $key;
 
-		if (array_key_exists($key, $array))
+		if (\Arr::array_key_exists($key, $array))
 		{
 			return $array[$key];
 		}
@@ -63,7 +63,7 @@ class Arr
 		{
 			if (($array instanceof \ArrayAccess and isset($array[$key_part])) === false)
 			{
-				if ( ! is_array($array) or ! array_key_exists($key_part, $array))
+				if ( ! is_array($array) or ! \Arr::array_key_exists($key_part, $array))
 				{
 					return \Fuel::value($default);
 				}
@@ -102,7 +102,7 @@ class Arr
 		{
 			$keys = explode('.', $key);
 
-			while (count($keys) > 1)
+			while (\Arr::count($keys) > 1)
 			{
 				$key = array_shift($keys);
 
@@ -163,7 +163,7 @@ class Arr
 	{
 		foreach (explode('.', $key) as $key_part)
 		{
-			if ( ! is_array($array) or ! array_key_exists($key_part, $array))
+			if ( ! is_array($array) or ! \Arr::array_key_exists($key_part, $array))
 			{
 				return false;
 			}
@@ -200,7 +200,7 @@ class Arr
 
 		$key_parts = explode('.', $key);
 
-		if ( ! is_array($array) or ! array_key_exists($key_parts[0], $array))
+		if ( ! is_array($array) or ! \Arr::array_key_exists($key_parts[0], $array))
 		{
 			return false;
 		}
@@ -290,7 +290,7 @@ class Arr
 	 */
 	public static function to_assoc($arr)
 	{
-		if (($count = count($arr)) % 2 > 0)
+		if (($count = \Arr::count($arr)) % 2 > 0)
 		{
 			throw new \BadMethodCallException('Number of values in to_assoc must be even.');
 		}
@@ -396,7 +396,7 @@ class Arr
 			{
 				$keys = explode($glue, $key);
 				$temp =& $return;
-				while (count($keys) > 1)
+				while (\Arr::count($keys) > 1)
 				{
 					$key = array_shift($keys);
 					$key = is_numeric($key) ? (int) $key : $key;
@@ -542,7 +542,7 @@ class Arr
 		$return = array();
 		foreach ($keys as $key)
 		{
-			if (array_key_exists($key, $array))
+			if (\Arr::array_key_exists($key, $array))
 			{
 				$remove or $return[$key] = $array[$key];
 				if($remove)
@@ -565,7 +565,7 @@ class Arr
 	 */
 	public static function insert(array &$original, $value, $pos)
 	{
-		if (count($original) < abs($pos))
+		if (\Arr::count($original) < abs($pos))
 		{
 			\Errorhandler::notice('Position larger than number of elements in array in which to insert.');
 			return false;
@@ -587,7 +587,7 @@ class Arr
 	 */
 	public static function insert_assoc(array &$original, array $values, $pos)
 	{
-		if (count($original) < abs($pos))
+		if (\Arr::count($original) < abs($pos))
 		{
 			return false;
 		}
@@ -780,7 +780,7 @@ class Arr
 	public static function average($array)
 	{
 		// No arguments passed, lets not divide by 0
-		if ( ! ($count = count($array)) > 0)
+		if ( ! ($count = \Arr::count($array)) > 0)
 		{
 			return 0;
 		}
@@ -812,7 +812,7 @@ class Arr
 
 		foreach ($source as $key => $value)
 		{
-			if (array_key_exists($key, $replace))
+			if (\Arr::array_key_exists($key, $replace))
 			{
 				$result[$replace[$key]] = $value;
 			}
@@ -858,9 +858,9 @@ class Arr
 				// numeric keys are appended
 				if (is_int($k))
 				{
-					array_key_exists($k, $array) ? $array[] = $v : $array[$k] = $v;
+					\Arr::array_key_exists($k, $array) ? $array[] = $v : $array[$k] = $v;
 				}
-				elseif (is_array($v) and array_key_exists($k, $array) and is_array($array[$k]))
+				elseif (is_array($v) and \Arr::array_key_exists($k, $array) and is_array($array[$k]))
 				{
 					$array[$k] = static::merge($array[$k], $v);
 				}
@@ -903,7 +903,7 @@ class Arr
 
 			foreach ($arr as $k => $v)
 			{
-				if (is_array($v) and array_key_exists($k, $array) and is_array($array[$k]))
+				if (is_array($v) and \Arr::array_key_exists($k, $array) and is_array($array[$k]))
 				{
 					$array[$k] = static::merge_assoc($array[$k], $v);
 				}
@@ -968,7 +968,7 @@ class Arr
 	public static function is_multi($arr, $all_keys = false)
 	{
 		$values = array_filter($arr, 'is_array');
-		return $all_keys ? count($arr) === count($values) : count($values) > 0;
+		return $all_keys ? \Arr::count($arr) === \Arr::count($values) : \Arr::count($values) > 0;
 	}
 
 	/**
@@ -1019,7 +1019,7 @@ class Arr
 					}
 				}
 			}
-			$key = count($keys) ? implode($delimiter, $keys) : false;
+			$key = \Arr::count($keys) ? implode($delimiter, $keys) : false;
 		}
 
 		return $key === false ? $default : $key;

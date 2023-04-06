@@ -43,6 +43,8 @@ class Date
 	 */
 	protected static $server_gmt_offset = 0;
 
+	protected static $use_strftime_workaround = false;
+
 	/**
 	 * @var string the timezone to be used to output formatted data
 	 */
@@ -50,6 +52,9 @@ class Date
 
 	public static function _init()
 	{
+		if (class_exists('IntlDateFormatter'))
+			static::$use_strftime_workaround = true;
+
 		static::$server_gmt_offset	= \Config::get('server_gmt_offset', 0);
 
 		static::$display_timezone = \Config::get('default_timezone') ?: date_default_timezone_get();
@@ -329,7 +334,10 @@ class Date
 		}
 
 		// Create output
-		$output = strftime($pattern, $this->timestamp);
+		if (static::$use_strftime_workaround)
+			$output = \PHP81_BC\strftime($pattern, $this->timestamp);
+		else
+			$output = strftime($pattern, $this->timestamp);
 
 		// Change timezone back to default if changed previously
 		if (\Fuel::$timezone != $timezone)

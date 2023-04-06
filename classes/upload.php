@@ -362,11 +362,13 @@ class Upload
 		foreach (static::$upload->getValidFiles() as $file)
 		{
 			// do we want to process this file?
-			if ( ! empty($ids) and ! in_array($counter++, $ids))
+			if (!empty($ids) and !in_array($file->element, $ids))
 			{
 				// nope
 				continue;
 			}
+
+			$counter++;
 
 			// was a custom path defined?
 			$path and $file->setConfig('path', $path);

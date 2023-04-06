@@ -28,7 +28,7 @@ class Fuel
 	/**
 	 * @var  string  The version of Fuel
 	 */
-	const VERSION = '1.7.3 (for PHP7)';
+	const VERSION = '1.7.3 (for PHP8)';
 
 	/**
 	 * @var  string  constant used for when in testing mode
