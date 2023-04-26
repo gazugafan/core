@@ -1,19 +1,26 @@
 <?php
 /**
- * Part of the Fuel framework.
+ * Fuel is a fast, lightweight, community driven PHP 5.4+ framework.
  *
  * @package    Fuel
- * @version    1.7
+ * @version    1.9-dev
  * @author     Fuel Development Team
  * @license    MIT License
- * @copyright  2010 - 2015 Fuel Development Team
- * @link       http://fuelphp.com
+ * @copyright  2010 - 2019 Fuel Development Team
+ * @link       https://fuelphp.com
  */
 
 namespace Fuel\Core;
 
-use \PHPSecLib\Crypt_AES;
-use \PHPSecLib\Crypt_Hash;
+use \phpseclib\Crypt\AES;
+use \phpseclib\Crypt\Hash;
+
+/**
+ * Sodium encryption/decryption code based on HaLite from ParagonIE
+ *
+ * Copyright (c) 2016 - 2018 Paragon Initiative Enterprises.
+ * Copyright (c) 2014 Steve "Sc00bz" Thomas (steve at tobtu dot com)
+ */
 
 class Crypt
 {
@@ -36,27 +43,45 @@ class Crypt
 	 */
 	public static function _init()
 	{
-		$crypter = new Crypt_AES();
-		$hasher = new Crypt_Hash('sha256');
+		// load the ParagonIE classes we need
+		import('paragonie.php', 'vendor');
 
 		// load the config
 		\Config::load('crypt', true);
 		static::$defaults = \Config::get('crypt', array());
 
-		// generate random crypto keys if we don't have them or they are incorrect length
+		// keep track of updates to the config
 		$update = false;
-		foreach(array('crypto_key', 'crypto_iv', 'crypto_hmac') as $key)
+
+		// check for legacy config
+		if (empty(static::$defaults['legacy']))
 		{
-			if ( empty(static::$defaults[$key]) or (strlen(static::$defaults[$key]) % 4) != 0)
+			$flag = true;
+			foreach(array('crypto_key', 'crypto_iv', 'crypto_hmac') as $key)
 			{
-				$crypto = '';
-				for ($i = 0; $i < 8; $i++)
+				if (empty(static::$defaults[$key]) or (strlen(static::$defaults[$key]) % 4) !== 0)
 				{
-					$crypto .= static::safe_b64encode(pack('n', mt_rand(0, 0xFFFF)));
+					$flag = false;
 				}
-				static::$defaults[$key] = $crypto;
+			}
+			// and if we found something valid, convert it
+			if ($flag)
+			{
+				static::$defaults['legacy'] = array();
+				foreach(array('crypto_key', 'crypto_iv', 'crypto_hmac') as $key)
+				{
+					static::$defaults['legacy'][$key] = static::$defaults[$key];
+					unset(static::$defaults[$key]);
+				}
 				$update = true;
 			}
+		}
+
+		// check the sodium config
+		if (empty(static::$defaults['sodium']['cipherkey']))
+		{
+			static::$defaults['sodium'] = array('cipherkey' => sodium_bin2hex(random_bytes(SODIUM_CRYPTO_STREAM_KEYBYTES)));
+			$update = true;
 		}
 
 		// update the config if needed
@@ -82,7 +107,9 @@ class Crypt
 	 *
 	 * create a new named instance
 	 *
-	 * @param	array	optional runtime configuration
+	 * @param	string	$name	instance name
+	 * @param	array	$config	optional runtime configuration
+	 * @return  \Crypt
 	 */
 	public static function forge($name = '__default__', array $config = array())
 	{
@@ -97,7 +124,7 @@ class Crypt
 	/**
 	 * Return a specific named instance
 	 *
-	 * @param   string  instance name
+	 * @param	string  $name	instance name
 	 * @return  mixed   Crypt if the instance exists, false if not
 	 */
 	public static function instance($name = '__default__')
@@ -112,6 +139,10 @@ class Crypt
 
 	/**
 	 * capture static calls to methods
+	 *
+	 * @param	mixed	$method
+	 * @param	array	$args	The arguments will passed to $method.
+	 * @return	mixed	return value of $method.
 	 */
 	public static function __callstatic($method, $args)
 	{
@@ -123,6 +154,9 @@ class Crypt
 
 	/**
 	 * generate a URI safe base64 encoded string
+	 *
+	 * @param	string	$value
+	 * @return	string
 	 */
 	protected static function safe_b64encode($value)
 	{
@@ -133,6 +167,9 @@ class Crypt
 
 	/**
 	 * decode a URI safe base64 encoded string
+	 *
+	 * @param	string	$value
+	 * @return	string
 	 */
 	protected static function safe_b64decode($value)
 	{
@@ -147,6 +184,10 @@ class Crypt
 
 	/**
 	 * compare two strings in a timing-insensitive way to prevent time-based attacks
+	 *
+	 * @param	string	$a
+	 * @param	string	$b
+	 * @return	bool
 	 */
 	protected static function secure_compare($a, $b)
 	{
@@ -163,6 +204,197 @@ class Crypt
 			$result |= ord($a[$i]) ^ ord($b[$i]);
 		}
 		return $result === 0;
+	}
+
+	/**
+	 * Split a key (using HKDF-BLAKE2b instead of HKDF-HMAC-*)
+	 *
+	 * @param string $key
+	 * @param string $salt
+	 * @return string[]
+	 */
+	protected static function split_keys($key, $salt)
+	{
+		return array(
+			static::hkdfBlake2b($key, SODIUM_CRYPTO_SECRETBOX_KEYBYTES, 'Halite|EncryptionKey', $salt),
+			static::hkdfBlake2b($key, SODIUM_CRYPTO_AUTH_KEYBYTES, 'AuthenticationKeyFor_|Halite', $salt)
+		);
+	}
+
+	/**
+	 * Split a message string into an array (assigned to variables via list()).
+	 *
+	 * Should return exactly 6 elements.
+	 *
+	 * @param string $ciphertext
+	 *
+	 * @return array<int, mixed>
+	 */
+	protected static function split_message($message)
+	{
+		// get the message length
+		$length = Binary::safeStrlen($message);
+
+		// check ig it's long enough
+		if ($length < 120)
+		{
+			throw new \FuelException('Crypt: Message is too short');
+		}
+
+		// the salt is used for key splitting (via HKDF)
+		$salt = Binary::safeSubstr($message, 0, 32);
+
+		// this is the nonce (we authenticated it)
+		$nonce = Binary::safeSubstr($message, 32, SODIUM_CRYPTO_STREAM_NONCEBYTES);
+
+		// This is the crypto_stream_xor()ed ciphertext
+		$encrypted = Binary::safeSubstr($message, 56, $length - 120);
+
+		// $auth is the last 32 bytes
+		$auth = Binary::safeSubstr($message, $length - SODIUM_CRYPTO_GENERICHASH_BYTES_MAX);
+
+		// We don't need this anymore.
+		static::memzero($message);
+
+		// Now we return the pieces in a specific order:
+		return array($salt, $nonce, $encrypted, $auth);
+	}
+
+
+	/**
+	 * Use a derivative of HKDF to derive multiple keys from one.
+	 * http://tools.ietf.org/html/rfc5869
+	 *
+	 * This is a variant from hash_hkdf() and instead uses BLAKE2b provided by
+	 * libsodium.
+	 *
+	 * Important: instead of a true HKDF (from HMAC) construct, this uses the
+	 * crypto_generichash() key parameter. This is *probably* okay.
+	 *
+	 * @param string $ikm Initial Keying Material
+	 * @param int $length How many bytes?
+	 * @param string $info What sort of key are we deriving?
+	 * @param string $salt
+	 * @return string
+	 */
+	protected static function hkdfBlake2b($ikm, $length, $info = '', $salt = '')
+	{
+		// Sanity-check the desired output length.
+		if ($length < 0 or $length > (255 * SODIUM_CRYPTO_GENERICHASH_KEYBYTES))
+		{
+			throw new \FuelException('hkdfBlake2b Argument 2: Bad HKDF Digest Length');
+		}
+
+		// "If [salt] not provided, is set to a string of HashLen zeroes."
+		if (empty($salt))
+		{
+			$salt = \str_repeat("\x00", SODIUM_CRYPTO_GENERICHASH_KEYBYTES);
+		}
+
+		// HKDF-Extract:
+		// PRK = HMAC-Hash(salt, IKM)
+		// The salt is the HMAC key.
+		$prk = static::raw_keyed_hash($ikm, $salt);
+
+		$t = '';
+		$last_block = '';
+		for ($block_index = 1; Binary::safeStrlen($t) < $length; ++$block_index)
+		{
+			// T(i) = HMAC-Hash(PRK, T(i-1) | info | 0x??)
+			$last_block = static::raw_keyed_hash($last_block . $info . \chr($block_index), $prk);
+
+			// T = T(1) | T(2) | T(3) | ... | T(N)
+			$t .= $last_block;
+		}
+
+		// ORM = first L octets of T
+		$orm = Binary::safeSubstr($t, 0, $length);
+
+		return $orm;
+	}
+
+	/**
+	 * Wrapper around SODIUM_CRypto_generichash()
+	 *
+	 * Expects a key (binary string).
+	 * Returns raw binary.
+	 *
+	 * @param string $input
+	 * @param string $key
+	 * @param int $length
+	 * @return string
+	 */
+	protected static function raw_keyed_hash($input, $key, $length = SODIUM_CRYPTO_GENERICHASH_BYTES)
+	{
+		if ($length < SODIUM_CRYPTO_GENERICHASH_BYTES_MIN)
+		{
+			throw new \FuelException(sprintf('Output length must be at least %d bytes.', SODIUM_CRYPTO_GENERICHASH_BYTES_MIN));
+		}
+
+		if ($length > SODIUM_CRYPTO_GENERICHASH_BYTES_MAX)
+		{
+			throw new \FuelException(sprintf('Output length must be at most %d bytes.', SODIUM_CRYPTO_GENERICHASH_BYTES_MAX));
+		}
+
+		return sodium_crypto_generichash($input, $key, $length);
+	}
+
+	/**
+	 * Calculate a MAC. This is used internally.
+	 *
+	 * @param string $message
+	 * @param string $authKey
+	 * @return string
+	 */
+	protected static function calculate_mac($message, $auth_key)
+	{
+		return sodium_crypto_generichash($message, $auth_key, SODIUM_CRYPTO_GENERICHASH_BYTES_MAX);
+	}
+
+	/**
+	 * Verify a Message Authentication Code (MAC) of a message, with a shared
+	 * key.
+	 *
+	 * @param string $mac             Message Authentication Code
+	 * @param string $message         The message to verify
+	 * @param string $authKey         Authentication key (symmetric)
+	 * @param SymmetricConfig $config Configuration object
+	 *
+	 * @return bool
+	 */
+	protected static function verify_mac($mac, $message, $auth_key)
+	{
+		if (Binary::safeStrlen($mac) !== SODIUM_CRYPTO_GENERICHASH_BYTES_MAX)
+		{
+			throw new \FuelException('Crypt::verify_mac - Argument 1: Message Authentication Code is not the correct length; is it encoded?');
+		}
+
+		$calc = sodium_crypto_generichash($message, $auth_key, SODIUM_CRYPTO_GENERICHASH_BYTES_MAX);
+		$res = Binary::hashEquals($mac, $calc);
+		static::memzero($calc);
+
+		return $res;
+	}
+
+	/**
+	 * Wrapper for sodium_memzero, it's actually not possible to zero
+	 * memory buffers in PHP. You need the native library for that.
+	 *
+	 * @param string|null $var
+	 *
+	 * @return void
+	 */
+	protected static function memzero(&$var)
+	{
+		// check if we have native support
+		if (PHP_VERSION_ID >= 70200 and extension_loaded('sodium'))
+		{
+			sodium_memzero($var);
+		}
+		elseif (extension_loaded('libsodium') and is_callable('\\Sodium\\memzero'))
+		{
+			@call_user_func('\\Sodium\\memzero', $var);
+		}
 	}
 
 	// --------------------------------------------------------------------
@@ -182,6 +414,20 @@ class Crypt
 	protected $hasher = null;
 
 	/**
+	 * Crypto object used to encrypt/decrypt
+	 *
+	 * @var	object
+	 */
+	protected $legacy_crypter = null;
+
+	/**
+	 * Hash object used to generate hashes
+	 *
+	 * @var	object
+	 */
+	protected $legacy_hasher = null;
+
+	/**
 	 * Crypto configuration
 	 *
 	 * @var	array
@@ -190,80 +436,177 @@ class Crypt
 
 	/**
 	 * Class constructor
+	 *
+	 * @param	array    $config
 	 */
 	public function __construct(array $config = array())
 	{
 		$this->config = array_merge(static::$defaults, $config);
 
-		$this->crypter = new Crypt_AES();
-		$this->hasher = new Crypt_Hash('sha256');
+		// in case we need to decode legacy encrypted strings
+		if ( ! empty($this->config['legacy']))
+		{
+			$this->legacy_crypter = new AES();
+			$this->legacy_hasher = new Hash('sha256');
 
-		$this->crypter->enableContinuousBuffer();
-		$this->hasher->setKey(static::safe_b64decode($this->config['crypto_hmac']));
+			$this->legacy_crypter->enableContinuousBuffer();
+			$this->legacy_hasher->setKey(static::safe_b64decode($this->config['legacy']['crypto_hmac']));
+		}
+	}
+
+	/**
+	 * capture calls to normal methods
+	 *
+	 * @param	mixed	$method
+	 * @param	array	$args	The arguments will passed to $method.
+	 * @return	mixed	return value of $method.
+	 * @throws	\ErrorException
+	 */
+	public function __call($method, $args)
+	{
+		// validate the method called
+		if ( ! in_array($method, array('encode', 'decode', 'legacy_decode')))
+		{
+			throw new \ErrorException('Call to undefined method '.__CLASS__.'::'.$method.'()', E_ERROR, 0, __FILE__, __LINE__);
+		}
+
+		// static method calls are called on the default instance
+		return call_user_func_array(array($this, $method), $args);
 	}
 
 	/**
 	 * encrypt a string value, optionally with a custom key
 	 *
-	 * @param	string	value to encrypt
-	 * @param	string	optional custom key to be used for this encryption
-	 * @param	int	optional key length
-	 * @access	public
+	 * @param	string		$value		value to encrypt
+	 * @param	string|bool	$key		optional custom key to be used for this encryption
+	 * @param	void		$keylength	no longer used
 	 * @return	string	encrypted value
 	 */
 	protected function encode($value, $key = false, $keylength = false)
 	{
+		// get the binary key
 		if ( ! $key)
 		{
-			$key = static::safe_b64decode($this->config['crypto_key']);
-			// Used for backwards compatibility with encrypted data prior
-			// to FuelPHP 1.7.2, when phpseclib was updated, and became a
-			// bit smarter about figuring out key lengths.
-			$keylength = 128;
+			$key = static::$defaults['sodium']['cipherkey'];
 		}
+		$key = sodium_hex2bin($key);
 
-		if ($keylength)
-		{
-			$this->crypter->setKeyLength($keylength);
-		}
+		// Generate a nonce and a HKDF salt
+		$nonce = random_bytes(SODIUM_CRYPTO_SECRETBOX_NONCEBYTES);
+		$salt = random_bytes(32);
 
-		$this->crypter->setKey($key);
-		$this->crypter->setIV(static::safe_b64decode($this->config['crypto_iv']));
+		/**
+		 * Split our key into two keys: One for encryption, the other for
+		 * authentication. By using separate keys, we can reasonably dismiss
+		 * likely cross-protocol attacks.
+		 *
+		 * This uses salted HKDF to split the keys, which is why we need the
+		 * salt in the first place.
+		 */
+		list($enc_key, $auth_key) = static::split_keys($key, $salt);
 
-		$value = $this->crypter->encrypt($value);
-		return static::safe_b64encode($this->add_hmac($value));
+		// Encrypt our message with the encryption key
+		$encrypted = sodium_crypto_stream_xor($value, $nonce, $enc_key);
+		static::memzero($enc_key);
 
-	}
+		// Calculate an authentication tag
+		$auth = static::calculate_mac($salt.$nonce.$encrypted, $auth_key);
+		static::memzero($auth_key);
 
-	/**
-	 * capture calls to normal methods
-	 */
-	public function __call($method, $args)
-	{
-		// validate the method called
-		if ( ! in_array($method, array('encode', 'decode')))
-		{
-			throw new \ErrorException('Call to undefined method '.__CLASS__.'::'.$method.'()', E_ERROR, 0, __FILE__, __LINE__);
-		}
+		// total encrypted message
+		$message = $salt.$nonce.$encrypted.$auth;
 
-		// static method calls are called on the defaukt instance
-		return call_user_func_array(array($this, $method), $args);
+		// wipe every superfluous piece of data from memory
+		static::memzero($nonce);
+		static::memzero($salt);
+		static::memzero($encrypted);
+		static::memzero($auth);
+
+		// return the base64 encoded message
+		return 'S:'.Base64UrlSafe::encode($message);
 	}
 
 	/**
 	 * decrypt a string value, optionally with a custom key
 	 *
-	 * @param	string	value to decrypt
-	 * @param	string	optional custom key to be used for this encryption
-	 * @param	int	optional key length
+	 * @param	string		$value		value to decrypt
+	 * @param	string|bool	$key		optional custom key to be used for this encryption
+	 * @param	void		$keylength	no longer used
 	 * @access	public
 	 * @return	string	encrypted value
 	 */
 	protected function decode($value, $key = false, $keylength = false)
 	{
+		// legacy or sodium value?
+		$value = explode('S:', $value);
+		if ( ! isset($value[1]))
+		{
+			// decode using the legacy method
+			return $this->legacy_decode($value[0], $key, $keylength);
+		}
+		$value = $value[1];
+
+		// get the binary key
 		if ( ! $key)
 		{
-			$key = static::safe_b64decode($this->config['crypto_key']);
+			$key = static::$defaults['sodium']['cipherkey'];
+		}
+		$key = sodium_hex2bin($key);
+
+		// get the base64 decoded message
+		$value = Base64UrlSafe::decode($value);
+
+		// split the message into it's components
+		list ($salt, $nonce, $encrypted, $auth) = static::split_message($value);
+
+		/* Split our key into two keys: One for encryption, the other for
+		 * authentication. By using separate keys, we can reasonably dismiss
+		 * likely cross-protocol attacks.
+         *
+		 * This uses salted HKDF to split the keys, which is why we need the
+		 * salt in the first place.
+		 */
+		list($enc_key, $auth_key) = static::split_keys($key, $salt);
+
+		// Check the MAC first
+		$res = static::verify_mac($auth, $salt.$nonce.$encrypted, $auth_key);
+		static::memzero($salt);
+		static::memzero($auth_key);
+
+		if ($res)
+		{
+			// crypto_stream_xor() can be used to encrypt and decrypt
+			/** @var string $plaintext */
+			$message = sodium_crypto_stream_xor($encrypted, $nonce, $enc_key);
+		}
+
+		static::memzero($encrypted);
+		static::memzero($nonce);
+		static::memzero($enc_key);
+
+		return $res ? $message : false;
+	}
+
+	/**
+	 * decrypt a string value, optionally with a custom key
+	 *
+	 * @param	string		$value		value to decrypt
+	 * @param	string|bool	$key		optional custom key to be used for this encryption
+	 * @param	int|bool	$keylength	optional key length
+	 * @access	public
+	 * @return	string	encrypted value
+	 */
+	protected function legacy_decode($value, $key = false, $keylength = false)
+	{
+		// make sure we have legacy keys
+		if (empty($this->config['legacy']['crypto_key']))
+		{
+			throw new \FuelException('Can not decode this string, no legacy crypt keys defined');
+		}
+
+		if ( ! $key)
+		{
+			$key = static::safe_b64decode($this->config['legacy']['crypto_key']);
 			// Used for backwards compatibility with encrypted data prior
 			// to FuelPHP 1.7.2, when phpseclib was updated, and became a
 			// bit smarter about figuring out key lengths.
@@ -272,30 +615,21 @@ class Crypt
 
 		if ($keylength)
 		{
-			$this->crypter->setKeyLength($keylength);
+			$this->legacy_crypter->setKeyLength($keylength);
 		}
 
-		$this->crypter->setKey($key);
-		$this->crypter->setIV(static::safe_b64decode($this->config['crypto_iv']));
+		$this->legacy_crypter->setKey($key);
+		$this->legacy_crypter->setIV(static::safe_b64decode($this->config['legacy']['crypto_iv']));
 
 		$value = static::safe_b64decode($value);
 		if ($value = $this->validate_hmac($value))
 		{
-			return $this->crypter->decrypt($value);
+			return $this->legacy_crypter->decrypt($value);
 		}
 		else
 		{
 			return false;
 		}
-	}
-
-	protected function add_hmac($value)
-	{
-		// calculate the hmac-sha256 hash of this value
-		$hmac = static::safe_b64encode($this->hasher->hash($value));
-
-		// append it and return the hmac protected string
-		return $value.$hmac;
 	}
 
 	protected function validate_hmac($value)
@@ -307,7 +641,474 @@ class Crypt
 		$value = substr($value, 0, strlen($value)-43);
 
 		// only return the value if it wasn't tampered with
-		return (static::secure_compare(static::safe_b64encode($this->hasher->hash($value)), $hmac)) ? $value : false;
+		return (static::secure_compare(static::safe_b64encode($this->legacy_hasher->hash($value)), $hmac)) ? $value : false;
 	}
 
+}
+
+
+/**
+ * Class Binary
+ *
+ * Binary string operators that don't choke on
+ * mbstring.func_overload
+ *
+ * @package ParagonIE\ConstantTime
+ */
+abstract class Binary
+{
+	/**
+	 * Safe string length
+	 *
+	 * @ref mbstring.func_overload
+	 *
+	 * @param string $str
+	 * @return int
+	 */
+	public static function safeStrlen($str)
+	{
+		if (function_exists('mb_strlen'))
+		{
+			return (int) mb_strlen($str, '8bit');
+		}
+		else
+		{
+			return (int) strlen($str);
+		}
+	}
+
+	/**
+	 * Safe substring
+	 *
+	 * @ref mbstring.func_overload
+	 *
+	 * @staticvar boolean $exists
+	 * @param string $str
+	 * @param int $start
+	 * @param int $length
+	 *
+	 * @return string
+	 */
+	public static function safeSubstr($str, $start = 0, $length = null)
+	{
+		if ($length === 0)
+		{
+			return '';
+		}
+		if (function_exists('mb_substr'))
+		{
+			return mb_substr($str, $start, $length, '8bit');
+		}
+		// Unlike mb_substr(), substr() doesn't accept NULL for length
+		if ($length !== null)
+		{
+			return substr($str, $start, $length);
+		}
+		else
+		{
+			return substr($str, $start);
+		}
+	}
+
+	/**
+	 * Evaluate whether or not two strings are equal (in constant-time)
+	 *
+	 * @param string $left
+	 * @param string $right
+	 * @return bool
+	 * @throws FuelException
+	 */
+	public static function hashEquals($left, $right)
+	{
+		if ( ! is_string($left))
+		{
+			throw new \FuelException('Argument 1 must be a string, ' . gettype($left) . ' given.');
+		}
+		if ( ! is_string($right))
+		{
+			throw new \FuelException('Argument 2 must be a string, ' . gettype($right) . ' given.');
+		}
+
+		if (is_callable('hash_equals'))
+		{
+			return hash_equals($left, $right);
+		}
+		$d = 0;
+
+		$len = self::safeStrlen($left);
+		if ($len !== self::safeStrlen($right))
+		{
+			return false;
+		}
+		for ($i = 0; $i < $len; ++$i)
+		{
+			$d |= self::chrToInt($left[$i]) ^ self::chrToInt($right[$i]);
+		}
+
+		if ($d !== 0)
+		{
+			return false;
+		}
+
+		return $left === $right;
+	}
+
+	/**
+	 * Cache-timing-safe variant of ord()
+	 *
+	 * @internal You should not use this directly from another application
+	 *
+	 * @param string $chr
+	 * @return int
+	 * @throws FuelException
+	 */
+	public static function chrToInt($chr)
+	{
+		if ( ! is_string($chr))
+		{
+			throw new \FuelException('Argument 1 must be a string, ' . gettype($chr) . ' given.');
+		}
+		if (self::safeStrlen($chr) !== 1)
+		{
+			throw new \FuelException('chrToInt() expects a string that is exactly 1 character long');
+		}
+
+		$chunk = unpack('C', $chr);
+
+		return (int) ($chunk[1]);
+	}
+}
+
+/**
+ * Class Base64
+ * [A-Z][a-z][0-9]+/
+ *
+ * @package ParagonIE\ConstantTime
+ */
+abstract class Base64
+{
+	/**
+	 * Encode into Base64
+	 *
+	 * Base64 character set "[A-Z][a-z][0-9]+/"
+	 *
+	 * @param string $src
+	 *
+	 * @return string
+	 */
+	public static function encode($src)
+	{
+		return static::doEncode($src, true);
+	}
+
+	/**
+	 * Encode into Base64, no = padding
+	 *
+	 * Base64 character set "[A-Z][a-z][0-9]+/"
+	 *
+	 * @param string $src
+	 *
+	 * @return string
+	 */
+	public static function encodeUnpadded($src)
+	{
+		return static::doEncode($src, false);
+	}
+
+	/**
+	 * @param string $src
+	 * @param bool $pad   Include = padding?
+	 *
+	 * @return string
+	 */
+	protected static function doEncode($src, $pad = true)
+	{
+		$dest = '';
+		$srcLen = Binary::safeStrlen($src);
+		// Main loop (no padding):
+		for ($i = 0; $i + 3 <= $srcLen; $i += 3)
+		{
+			/** @var array<int, int> $chunk */
+			$chunk = unpack('C*', Binary::safeSubstr($src, $i, 3));
+			$b0 = $chunk[1];
+			$b1 = $chunk[2];
+			$b2 = $chunk[3];
+
+			$dest .=
+				static::encode6Bits(               $b0 >> 2       ) .
+				static::encode6Bits((($b0 << 4) | ($b1 >> 4)) & 63) .
+				static::encode6Bits((($b1 << 2) | ($b2 >> 6)) & 63) .
+				static::encode6Bits(  $b2                     & 63);
+		}
+		// The last chunk, which may have padding:
+		if ($i < $srcLen)
+		{
+			/** @var array<int, int> $chunk */
+			$chunk = unpack('C*', Binary::safeSubstr($src, $i, $srcLen - $i));
+			$b0 = $chunk[1];
+			if ($i + 1 < $srcLen)
+			{
+				$b1 = $chunk[2];
+				$dest .=
+					static::encode6Bits($b0 >> 2) .
+					static::encode6Bits((($b0 << 4) | ($b1 >> 4)) & 63) .
+					static::encode6Bits(($b1 << 2) & 63);
+				if ($pad)
+				{
+					$dest .= '=';
+				}
+			}
+			else
+			{
+				$dest .=
+					static::encode6Bits( $b0 >> 2) .
+					static::encode6Bits(($b0 << 4) & 63);
+				if ($pad)
+				{
+					$dest .= '==';
+				}
+			}
+		}
+
+		return $dest;
+	}
+
+	/**
+	 * decode from base64 into binary
+	 *
+	 * Base64 character set "./[A-Z][a-z][0-9]"
+	 *
+	 * @param string $src
+	 * @param bool $strictPadding
+	 *
+	 * @return string
+	 * @throws \RangeException
+	 */
+	public static function decode($src, $strictPadding = false)
+	{
+		// Remove padding
+		$srcLen = Binary::safeStrlen($src);
+		if ($srcLen === 0)
+		{
+			return '';
+		}
+
+		if ($strictPadding)
+		{
+			if (($srcLen & 3) === 0)
+			{
+				if ($src[$srcLen - 1] === '=')
+				{
+					$srcLen--;
+					if ($src[$srcLen - 1] === '=')
+					{
+						$srcLen--;
+					}
+				}
+			}
+			if (($srcLen & 3) === 1)
+			{
+				throw new \RangeException('Incorrect padding');
+			}
+			if ($src[$srcLen - 1] === '=')
+			{
+				throw new \RangeException('Incorrect padding');
+			}
+		}
+		else
+		{
+			$src = rtrim($src, '=');
+			$srcLen = Binary::safeStrlen($src);
+		}
+
+		$err = 0;
+		$dest = '';
+		// Main loop (no padding):
+		for ($i = 0; $i + 4 <= $srcLen; $i += 4)
+		{
+			/** @var array<int, int> $chunk */
+			$chunk = unpack('C*', Binary::safeSubstr($src, $i, 4));
+			$c0 = static::decode6Bits($chunk[1]);
+			$c1 = static::decode6Bits($chunk[2]);
+			$c2 = static::decode6Bits($chunk[3]);
+			$c3 = static::decode6Bits($chunk[4]);
+
+			$dest .= pack(
+				'CCC',
+				((($c0 << 2) | ($c1 >> 4)) & 0xff),
+				((($c1 << 4) | ($c2 >> 2)) & 0xff),
+				((($c2 << 6) |  $c3      ) & 0xff)
+			);
+			$err |= ($c0 | $c1 | $c2 | $c3) >> 8;
+		}
+
+		// The last chunk, which may have padding:
+		if ($i < $srcLen)
+		{
+			/** @var array<int, int> $chunk */
+			$chunk = unpack('C*', Binary::safeSubstr($src, $i, $srcLen - $i));
+			$c0 = static::decode6Bits($chunk[1]);
+
+			if ($i + 2 < $srcLen)
+			{
+				$c1 = static::decode6Bits($chunk[2]);
+				$c2 = static::decode6Bits($chunk[3]);
+				$dest .= pack(
+					'CC',
+					((($c0 << 2) | ($c1 >> 4)) & 0xff),
+					((($c1 << 4) | ($c2 >> 2)) & 0xff)
+				);
+				$err |= ($c0 | $c1 | $c2) >> 8;
+			}
+			elseif ($i + 1 < $srcLen)
+			{
+				$c1 = static::decode6Bits($chunk[2]);
+				$dest .= pack(
+					'C',
+					((($c0 << 2) | ($c1 >> 4)) & 0xff)
+				);
+				$err |= ($c0 | $c1) >> 8;
+			}
+			elseif ($i < $srcLen && $strictPadding)
+			{
+				$err |= 1;
+			}
+		}
+		if ($err !== 0)
+		{
+			throw new \RangeException('Base64::decode() only expects characters in the correct base64 alphabet');
+		}
+
+		return $dest;
+	}
+
+	/**
+	 * Uses bitwise operators instead of table-lookups to turn 6-bit integers
+	 * into 8-bit integers.
+	 *
+	 * Base64 character set:
+	 * [A-Z]      [a-z]      [0-9]      +     /
+	 * 0x41-0x5a, 0x61-0x7a, 0x30-0x39, 0x2b, 0x2f
+	 *
+	 * @param int $src
+	 *
+	 * @return int
+	 */
+	protected static function decode6Bits($src)
+	{
+		$ret = -1;
+
+		// if ($src > 0x40 && $src < 0x5b) $ret += $src - 0x41 + 1; // -64
+		$ret += (((0x40 - $src) & ($src - 0x5b)) >> 8) & ($src - 64);
+
+		// if ($src > 0x60 && $src < 0x7b) $ret += $src - 0x61 + 26 + 1; // -70
+		$ret += (((0x60 - $src) & ($src - 0x7b)) >> 8) & ($src - 70);
+
+		// if ($src > 0x2f && $src < 0x3a) $ret += $src - 0x30 + 52 + 1; // 5
+		$ret += (((0x2f - $src) & ($src - 0x3a)) >> 8) & ($src + 5);
+
+		// if ($src == 0x2b) $ret += 62 + 1;
+		$ret += (((0x2a - $src) & ($src - 0x2c)) >> 8) & 63;
+
+		// if ($src == 0x2f) ret += 63 + 1;
+		$ret += (((0x2e - $src) & ($src - 0x30)) >> 8) & 64;
+
+		return $ret;
+	}
+
+	/**
+	 * Uses bitwise operators instead of table-lookups to turn 8-bit integers
+	 * into 6-bit integers.
+	 *
+	 * @param int $src
+	 *
+	 * @return string
+	 */
+	protected static function encode6Bits($src)
+	{
+		$diff = 0x41;
+
+		// if ($src > 25) $diff += 0x61 - 0x41 - 26; // 6
+		$diff += ((25 - $src) >> 8) & 6;
+
+		// if ($src > 51) $diff += 0x30 - 0x61 - 26; // -75
+		$diff -= ((51 - $src) >> 8) & 75;
+
+		// if ($src > 61) $diff += 0x2b - 0x30 - 10; // -15
+		$diff -= ((61 - $src) >> 8) & 15;
+
+		// if ($src > 62) $diff += 0x2f - 0x2b - 1; // 3
+		$diff += ((62 - $src) >> 8) & 3;
+
+		return pack('C', $src + $diff);
+	}
+}
+
+/**
+ * Class Base64UrlSafe
+ * [A-Z][a-z][0-9]\-_
+ *
+ * @package ParagonIE\ConstantTime
+ */
+abstract class Base64UrlSafe extends Base64
+{
+
+	/**
+	 * Uses bitwise operators instead of table-lookups to turn 6-bit integers
+	 * into 8-bit integers.
+	 *
+	 * Base64 character set:
+	 * [A-Z]      [a-z]      [0-9]      -     _
+	 * 0x41-0x5a, 0x61-0x7a, 0x30-0x39, 0x2d, 0x5f
+	 *
+	 * @param int $src
+	 * @return int
+	 */
+	protected static function decode6Bits($src)
+	{
+		$ret = -1;
+
+		// if ($src > 0x40 && $src < 0x5b) $ret += $src - 0x41 + 1; // -64
+		$ret += (((0x40 - $src) & ($src - 0x5b)) >> 8) & ($src - 64);
+
+		// if ($src > 0x60 && $src < 0x7b) $ret += $src - 0x61 + 26 + 1; // -70
+		$ret += (((0x60 - $src) & ($src - 0x7b)) >> 8) & ($src - 70);
+
+		// if ($src > 0x2f && $src < 0x3a) $ret += $src - 0x30 + 52 + 1; // 5
+		$ret += (((0x2f - $src) & ($src - 0x3a)) >> 8) & ($src + 5);
+
+		// if ($src == 0x2c) $ret += 62 + 1;
+		$ret += (((0x2c - $src) & ($src - 0x2e)) >> 8) & 63;
+
+		// if ($src == 0x5f) ret += 63 + 1;
+		$ret += (((0x5e - $src) & ($src - 0x60)) >> 8) & 64;
+
+		return $ret;
+	}
+
+	/**
+	 * Uses bitwise operators instead of table-lookups to turn 8-bit integers
+	 * into 6-bit integers.
+	 *
+	 * @param int $src
+	 * @return string
+	 */
+	protected static function encode6Bits($src)
+	{
+		$diff = 0x41;
+
+		// if ($src > 25) $diff += 0x61 - 0x41 - 26; // 6
+		$diff += ((25 - $src) >> 8) & 6;
+
+		// if ($src > 51) $diff += 0x30 - 0x61 - 26; // -75
+		$diff -= ((51 - $src) >> 8) & 75;
+
+		// if ($src > 61) $diff += 0x2d - 0x30 - 10; // -13
+		$diff -= ((61 - $src) >> 8) & 13;
+
+		// if ($src > 62) $diff += 0x5f - 0x2b - 1; // 3
+		$diff += ((62 - $src) >> 8) & 49;
+
+		return pack('C', $src + $diff);
+	}
 }
