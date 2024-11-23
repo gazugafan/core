@@ -109,7 +109,7 @@ class Log
 		if (!$handle)
 		{
 			\Config::set('log_threshold', \Fuel::L_NONE);
-			throw new \FuelException('Unable to open or create the log file: '.$filename);
+			return;
 		}
 
 		if ( ! filesize($filename))
