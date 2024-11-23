@@ -106,6 +106,12 @@ class Log
 			throw new \FuelException('Unable to create or write to the log file. Please check the permissions on '.\Config::get('log_path').'. ('.$e->getMessage().')');
 		}
 
+		if (!$handle)
+		{
+			\Config::set('log_threshold', \Fuel::L_NONE);
+			throw new \FuelException('Unable to open or create the log file: '.$filename);
+		}
+
 		if ( ! filesize($filename))
 		{
 			fwrite($handle, "<?php defined('COREPATH') or exit('No direct script access allowed'); ?>".PHP_EOL.PHP_EOL);
